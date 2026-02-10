@@ -10,10 +10,25 @@
 SWITCH_AUDIO_SOURCE="SwitchAudioSource"
 # Ordered by priority (first item is highest priority).
 PRIORITY_INPUTS=(
+  "EarPods Microphone"
   "Blue Snowball"
-  "Built-in Microphone"
 )
 POLL_INTERVAL=5
+NOTIFY_STATE_FILE="/tmp/input_source_notify_state"
+NOTIFY_DEDUP_WINDOW=30
+
+should_send_startup_notification() {
+  local now last_ts
+  now=$(date +%s)
+  if [[ -f "$NOTIFY_STATE_FILE" ]]; then
+    last_ts=$(<"$NOTIFY_STATE_FILE")
+    if [[ "$last_ts" == <-> ]] && (( now - last_ts < NOTIFY_DEDUP_WINDOW )); then
+      return 1
+    fi
+  fi
+  print -r -- "$now" > "$NOTIFY_STATE_FILE"
+  return 0
+}
 
 pick_prioritized_input() {
   local connected_inputs="$1"
@@ -61,14 +76,23 @@ case "${1:---set}" in
     echo ""
     echo "  --list      List all available input devices"
     echo "  --current   Show currently selected input device"
-    echo "  --set       Daemon: poll for selected input device and switch when available (default when no args)"
+    echo "  --set       Daemon: poll priority list and switch to highest connected device (default)"
     echo "  \"Device\"    Switch to the specified input device"
     exit 0
     ;;
   --set)
     # Wait for session/audio to be ready after login
     sleep 15
-    osascript -e 'display notification "Polling prioritized input list" with title "Input Source"' 2>/dev/null
+    connected_inputs=$($SWITCH_AUDIO_SOURCE -t input -a)
+    startup_device=$(pick_prioritized_input "$connected_inputs")
+    if [[ -n "$startup_device" ]]; then
+      startup_message="Polling device: $startup_device"
+    else
+      startup_message="Polling device: none detected"
+    fi
+    if should_send_startup_notification; then
+      osascript -e "display notification \"$startup_message\" with title \"Input Source\"" 2>/dev/null
+    fi
     while true; do
       connected_inputs=$($SWITCH_AUDIO_SOURCE -t input -a)
       device=$(pick_prioritized_input "$connected_inputs")
