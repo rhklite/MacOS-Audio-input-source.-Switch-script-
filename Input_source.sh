@@ -12,6 +12,7 @@ SWITCH_AUDIO_SOURCE="SwitchAudioSource"
 PRIORITY_INPUTS=(
   "EarPods Microphone"
   "Blue Snowball"
+  "USB PnP Audio Device"
 )
 POLL_INTERVAL=5
 NOTIFY_STATE_FILE="/tmp/input_source_notify_state"
