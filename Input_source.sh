@@ -58,6 +58,12 @@ pick_prioritized_input() {
   return 1
 }
 
+is_continuity_camera_device() {
+  local device_name="$1"
+  local normalized_name="${(L)device_name}"
+  [[ "$normalized_name" == *"continuity camera"* ]]
+}
+
 if ! command -v "$SWITCH_AUDIO_SOURCE" &>/dev/null; then
   echo "Error: SwitchAudioSource is not installed." >&2
   echo "Install it with: brew install switchaudio-osx" >&2
@@ -98,7 +104,7 @@ case "${1:---set}" in
       device=$(pick_prioritized_input "$connected_inputs")
       if [[ -n "$device" ]]; then
         current_device=$($SWITCH_AUDIO_SOURCE -t input -c)
-        if [[ "$current_device" != "$device" ]]; then
+        if ! is_continuity_camera_device "$current_device" && [[ "$current_device" != "$device" ]]; then
           $SWITCH_AUDIO_SOURCE -t input -s "$device"
         fi
       fi
