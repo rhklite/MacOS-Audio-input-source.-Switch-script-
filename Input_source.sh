@@ -10,9 +10,8 @@
 SWITCH_AUDIO_SOURCE="SwitchAudioSource"
 # Ordered by priority (first item is highest priority).
 PRIORITY_INPUTS=(
-  "EarPods Microphone"
+  "Yeti X"
   "Blue Snowball"
-  "USB PnP Audio Device"
 )
 POLL_INTERVAL=5
 NOTIFY_STATE_FILE="/tmp/input_source_notify_state"
