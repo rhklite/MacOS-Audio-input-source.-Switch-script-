@@ -102,44 +102,43 @@ case "${1:---set}" in
     last_set_by_script=""
     manual_override=false
     prev_connected=""
+    prev_output_device=""
     while true; do
       connected_inputs=$($SWITCH_AUDIO_SOURCE -t input -a)
-      priority_device=$(pick_prioritized_input "$connected_inputs")
-      current_device=$($SWITCH_AUDIO_SOURCE -t input -c)
-
-      if is_continuity_camera_device "$current_device"; then
-        prev_connected="$connected_inputs"
-        sleep "$POLL_INTERVAL"
-        continue
+      priority_input_device=$(pick_prioritized_input "$connected_inputs")
+      current_input_device=$($SWITCH_AUDIO_SOURCE -t input -c)
+      current_output_device=$($SWITCH_AUDIO_SOURCE -t output -c)
+      output_changed=false
+      if [[ -n "$prev_output_device" && "$current_output_device" != "$prev_output_device" ]]; then
+        output_changed=true
       fi
 
-      if [[ "$manual_override" == true ]]; then
-        if [[ -n "$priority_device" && "$current_device" == "$priority_device" ]]; then
+      if is_continuity_camera_device "$current_input_device"; then
+        : # Never auto-switch away from Continuity Camera.
+      elif [[ "$manual_override" == true ]]; then
+        if [[ -n "$priority_input_device" && "$current_input_device" == "$priority_input_device" ]]; then
           manual_override=false
-          last_set_by_script="$priority_device"
+          last_set_by_script="$priority_input_device"
         fi
-        prev_connected="$connected_inputs"
-        sleep "$POLL_INTERVAL"
-        continue
-      fi
-
-      if [[ -n "$priority_device" && -n "$last_set_by_script" && "$current_device" != "$last_set_by_script" ]]; then
-        if [[ -n "$prev_connected" && $'\n'"$prev_connected"$'\n' == *$'\n'"$current_device"$'\n'* ]]; then
-          manual_override=true
-          prev_connected="$connected_inputs"
-          sleep "$POLL_INTERVAL"
-          continue
-        fi
-      fi
-
-      if [[ -n "$priority_device" && "$current_device" != "$priority_device" ]]; then
-        $SWITCH_AUDIO_SOURCE -t input -s "$priority_device"
-        last_set_by_script="$priority_device"
       else
-        last_set_by_script="$current_device"
+        if [[ "$output_changed" != true && -n "$priority_input_device" && -n "$last_set_by_script" && "$current_input_device" != "$last_set_by_script" ]]; then
+          if [[ -n "$prev_connected" && $'\n'"$prev_connected"$'\n' == *$'\n'"$current_input_device"$'\n'* ]]; then
+            manual_override=true
+          fi
+        fi
+
+        if [[ "$manual_override" != true ]]; then
+          if [[ -n "$priority_input_device" && "$current_input_device" != "$priority_input_device" ]]; then
+            $SWITCH_AUDIO_SOURCE -t input -s "$priority_input_device"
+            last_set_by_script="$priority_input_device"
+          else
+            last_set_by_script="$current_input_device"
+          fi
+        fi
       fi
 
       prev_connected="$connected_inputs"
+      prev_output_device="$current_output_device"
       sleep "$POLL_INTERVAL"
     done
     ;;
