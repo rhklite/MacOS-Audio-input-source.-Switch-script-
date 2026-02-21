@@ -1,7 +1,7 @@
 #!/bin/zsh
 
 # Audio microphone input source switcher using SwitchAudioSource
-# Note: LaunchAgent runs from ~/bin/Input_source.sh — copy edits there for login behavior.
+# If you start this at login, ensure Login Items points here (or symlink ~/bin/Input_source.sh).
 # Requires: brew install switchaudio-osx
 # Switches to the highest-priority connected input device from PRIORITY_INPUTS.
 # Runs as daemon when no args/--set: stays in background and polls for
@@ -99,15 +99,47 @@ case "${1:---set}" in
     if should_send_startup_notification; then
       osascript -e "display notification \"$startup_message\" with title \"Input Source\"" 2>/dev/null
     fi
+    last_set_by_script=""
+    manual_override=false
+    prev_connected=""
     while true; do
       connected_inputs=$($SWITCH_AUDIO_SOURCE -t input -a)
-      device=$(pick_prioritized_input "$connected_inputs")
-      if [[ -n "$device" ]]; then
-        current_device=$($SWITCH_AUDIO_SOURCE -t input -c)
-        if ! is_continuity_camera_device "$current_device" && [[ "$current_device" != "$device" ]]; then
-          $SWITCH_AUDIO_SOURCE -t input -s "$device"
+      priority_device=$(pick_prioritized_input "$connected_inputs")
+      current_device=$($SWITCH_AUDIO_SOURCE -t input -c)
+
+      if is_continuity_camera_device "$current_device"; then
+        prev_connected="$connected_inputs"
+        sleep "$POLL_INTERVAL"
+        continue
+      fi
+
+      if [[ "$manual_override" == true ]]; then
+        if [[ -n "$priority_device" && "$current_device" == "$priority_device" ]]; then
+          manual_override=false
+          last_set_by_script="$priority_device"
+        fi
+        prev_connected="$connected_inputs"
+        sleep "$POLL_INTERVAL"
+        continue
+      fi
+
+      if [[ -n "$priority_device" && -n "$last_set_by_script" && "$current_device" != "$last_set_by_script" ]]; then
+        if [[ -n "$prev_connected" && $'\n'"$prev_connected"$'\n' == *$'\n'"$current_device"$'\n'* ]]; then
+          manual_override=true
+          prev_connected="$connected_inputs"
+          sleep "$POLL_INTERVAL"
+          continue
         fi
       fi
+
+      if [[ -n "$priority_device" && "$current_device" != "$priority_device" ]]; then
+        $SWITCH_AUDIO_SOURCE -t input -s "$priority_device"
+        last_set_by_script="$priority_device"
+      else
+        last_set_by_script="$current_device"
+      fi
+
+      prev_connected="$connected_inputs"
       sleep "$POLL_INTERVAL"
     done
     ;;
