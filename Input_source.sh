@@ -3,70 +3,22 @@
 # Audio microphone input source switcher using SwitchAudioSource
 # If you start this at login, ensure Login Items points here (or symlink ~/bin/Input_source.sh).
 # Requires: brew install switchaudio-osx
-# Switches to the highest-priority connected input device from PRIORITY_INPUTS.
-# Runs as daemon when no args/--set: stays in background and polls for
-# prioritized devices to be connected or reconnected.
+#           pip install rumps
+# The --set mode launches a menu bar app (input_source_menubar.py) that handles
+# polling and switching with Dictation / Meeting mode toggle.
 
 SWITCH_AUDIO_SOURCE="SwitchAudioSource"
-# Ordered by priority (first item is highest priority).
-PRIORITY_INPUTS=(
-  "Yeti X"
-  "Blue Snowball"
-)
-POLL_INTERVAL=5
-NOTIFY_STATE_FILE="/tmp/input_source_notify_state"
-NOTIFY_DEDUP_WINDOW=30
-
-should_send_startup_notification() {
-  local now last_ts
-  now=$(date +%s)
-  if [[ -f "$NOTIFY_STATE_FILE" ]]; then
-    last_ts=$(<"$NOTIFY_STATE_FILE")
-    if [[ "$last_ts" == <-> ]] && (( now - last_ts < NOTIFY_DEDUP_WINDOW )); then
-      return 1
-    fi
-  fi
-  print -r -- "$now" > "$NOTIFY_STATE_FILE"
-  return 0
-}
-
-pick_prioritized_input() {
-  local connected_inputs="$1"
-  local preferred
-  local device
-
-  # Exact-name match first.
-  for preferred in "${PRIORITY_INPUTS[@]}"; do
-    while IFS= read -r device; do
-      if [[ "$device" == "$preferred" ]]; then
-        echo "$device"
-        return 0
-      fi
-    done <<< "$connected_inputs"
-  done
-
-  # Optional safe fallback: partial-name match.
-  for preferred in "${PRIORITY_INPUTS[@]}"; do
-    while IFS= read -r device; do
-      if [[ "$device" == *"$preferred"* ]]; then
-        echo "$device"
-        return 0
-      fi
-    done <<< "$connected_inputs"
-  done
-
-  return 1
-}
-
-is_continuity_camera_device() {
-  local device_name="$1"
-  local normalized_name="${(L)device_name}"
-  [[ "$normalized_name" == *"continuity camera"* ]]
-}
+SCRIPT_DIR="${0:A:h}"
+MENUBAR_APP="$SCRIPT_DIR/input_source_menubar.py"
 
 if ! command -v "$SWITCH_AUDIO_SOURCE" &>/dev/null; then
   echo "Error: SwitchAudioSource is not installed." >&2
   echo "Install it with: brew install switchaudio-osx" >&2
+  exit 1
+fi
+
+if ! command -v python3 &>/dev/null; then
+  echo "Error: python3 is not installed." >&2
   exit 1
 fi
 
@@ -82,68 +34,19 @@ case "${1:---set}" in
     echo ""
     echo "  --list      List all available input devices"
     echo "  --current   Show currently selected input device"
-    echo "  --set       Daemon: poll priority list and switch to highest connected device (default)"
+    echo "  --set       Launch menu bar app with Dictation/Meeting mode (default)"
     echo "  \"Device\"    Switch to the specified input device"
     exit 0
     ;;
   --set)
-    # Wait for session/audio to be ready after login
+    if [[ ! -f "$MENUBAR_APP" ]]; then
+      echo "Error: Menu bar app not found at $MENUBAR_APP" >&2
+      exit 1
+    fi
     sleep 15
-    connected_inputs=$($SWITCH_AUDIO_SOURCE -t input -a)
-    startup_device=$(pick_prioritized_input "$connected_inputs")
-    if [[ -n "$startup_device" ]]; then
-      startup_message="Polling device: $startup_device"
-    else
-      startup_message="Polling device: none detected"
-    fi
-    if should_send_startup_notification; then
-      osascript -e "display notification \"$startup_message\" with title \"Input Source\"" 2>/dev/null
-    fi
-    last_set_by_script=""
-    manual_override=false
-    prev_connected=""
-    prev_output_device=""
-    while true; do
-      connected_inputs=$($SWITCH_AUDIO_SOURCE -t input -a)
-      priority_input_device=$(pick_prioritized_input "$connected_inputs")
-      current_input_device=$($SWITCH_AUDIO_SOURCE -t input -c)
-      current_output_device=$($SWITCH_AUDIO_SOURCE -t output -c)
-      output_changed=false
-      if [[ -n "$prev_output_device" && "$current_output_device" != "$prev_output_device" ]]; then
-        output_changed=true
-      fi
-
-      if is_continuity_camera_device "$current_input_device"; then
-        : # Never auto-switch away from Continuity Camera.
-      elif [[ "$manual_override" == true ]]; then
-        if [[ -n "$priority_input_device" && "$current_input_device" == "$priority_input_device" ]]; then
-          manual_override=false
-          last_set_by_script="$priority_input_device"
-        fi
-      else
-        if [[ "$output_changed" != true && -n "$priority_input_device" && -n "$last_set_by_script" && "$current_input_device" != "$last_set_by_script" ]]; then
-          if [[ -n "$prev_connected" && $'\n'"$prev_connected"$'\n' == *$'\n'"$current_input_device"$'\n'* ]]; then
-            manual_override=true
-          fi
-        fi
-
-        if [[ "$manual_override" != true ]]; then
-          if [[ -n "$priority_input_device" && "$current_input_device" != "$priority_input_device" ]]; then
-            $SWITCH_AUDIO_SOURCE -t input -s "$priority_input_device"
-            last_set_by_script="$priority_input_device"
-          else
-            last_set_by_script="$current_input_device"
-          fi
-        fi
-      fi
-
-      prev_connected="$connected_inputs"
-      prev_output_device="$current_output_device"
-      sleep "$POLL_INTERVAL"
-    done
+    exec python3 "$MENUBAR_APP"
     ;;
   *)
-    # Device name argument: switch to specified device
     $SWITCH_AUDIO_SOURCE -t input -s "$1"
     ;;
 esac
