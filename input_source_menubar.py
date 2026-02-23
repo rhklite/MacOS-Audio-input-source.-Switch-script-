@@ -17,8 +17,9 @@ from typing import Optional
 
 import rumps
 
-SWITCH_AUDIO_SOURCE = "SwitchAudioSource"
+SWITCH_AUDIO_SOURCE = "/opt/homebrew/bin/SwitchAudioSource"
 PRIORITY_INPUTS = ["Yeti X", "Blue Snowball"]
+HIDDEN_DEVICE_KEYWORDS = ["nomachine audio adapter", "nomachine microphone adapter"]
 POLL_INTERVAL = 5
 STATE_FILE = "/tmp/input_source_mode"
 
@@ -49,8 +50,17 @@ def get_current_output() -> str:
     return run_sas("-t", "output", "-c")
 
 
+def get_connected_outputs() -> list[str]:
+    output = run_sas("-t", "output", "-a")
+    return [line for line in output.splitlines() if line]
+
+
 def set_input(device: str) -> None:
     run_sas("-t", "input", "-s", device)
+
+
+def set_output(device: str) -> None:
+    run_sas("-t", "output", "-s", device)
 
 
 def pick_prioritized_input(connected: list[str]) -> Optional[str]:
@@ -66,6 +76,38 @@ def pick_prioritized_input(connected: list[str]) -> Optional[str]:
 
 def is_continuity_camera(device: str) -> bool:
     return "continuity camera" in device.lower()
+
+
+def is_airpods(device: str) -> bool:
+    name = device.lower()
+    return "airpods" in name or ("ellie" in name and "ears" in name)
+
+
+def is_hidden_device(device: str) -> bool:
+    name = device.lower()
+    return any(keyword in name for keyword in HIDDEN_DEVICE_KEYWORDS)
+
+
+def get_connected_airpods_name() -> Optional[str]:
+    devices = get_connected_inputs() + get_connected_outputs()
+    for d in devices:
+        if is_airpods(d):
+            return d
+    return None
+
+
+def open_sound_settings() -> None:
+    subprocess.run(
+        ["open", "x-apple.systempreferences:com.apple.Sound-Settings.extension"],
+        check=False,
+    )
+
+
+def open_airpods_settings() -> None:
+    subprocess.run(
+        ["open", "x-apple.systempreferences:com.apple.BluetoothSettings"],
+        check=False,
+    )
 
 
 def find_matching_input(output_device: str, connected_inputs: list[str]) -> Optional[str]:
@@ -106,22 +148,86 @@ class InputSourceApp(rumps.App):
         self.meeting_item = rumps.MenuItem(
             "Meeting Mode", callback=self.set_meeting
         )
-        self.input_info = rumps.MenuItem("Input: —")
-        self.input_info.set_callback(None)
-        self.output_info = rumps.MenuItem("Output: —")
-        self.output_info.set_callback(None)
+
+        self.input_submenu = rumps.MenuItem("Input")
+        self.output_submenu = rumps.MenuItem("Output")
+
+        self.sound_settings_item = rumps.MenuItem(
+            "Sound Settings...", callback=self._open_sound_settings
+        )
+        self.airpods_settings_item = rumps.MenuItem(
+            "AirPods Settings...", callback=self._open_airpods_settings
+        )
+
+        self._populate_initial_devices()
 
         self.menu = [
             self.dictation_item,
             self.meeting_item,
             None,
-            self.input_info,
-            self.output_info,
+            self.input_submenu,
+            self.output_submenu,
+            None,
+            self.sound_settings_item,
+            self.airpods_settings_item,
         ]
         self._apply_mode_ui()
+        self._update_airpods_visibility()
 
         self.timer = rumps.Timer(self._poll, POLL_INTERVAL)
         self.timer.start()
+
+    def _populate_initial_devices(self):
+        current_input = get_current_input()
+        current_output = get_current_output()
+        connected_inputs = get_connected_inputs()
+        connected_outputs = get_connected_outputs()
+        self._update_submenu(
+            self.input_submenu, connected_inputs, current_input, self._select_input
+        )
+        self._update_submenu(
+            self.output_submenu, connected_outputs, current_output, self._select_output
+        )
+
+    def _rebuild_device_menus(self):
+        current_input = get_current_input()
+        current_output = get_current_output()
+        connected_inputs = get_connected_inputs()
+        connected_outputs = get_connected_outputs()
+
+        self._update_submenu(
+            self.input_submenu, connected_inputs, current_input, self._select_input
+        )
+        self._update_submenu(
+            self.output_submenu, connected_outputs, current_output, self._select_output
+        )
+
+    def _update_submenu(self, submenu, devices, current, callback):
+        filtered_devices = [d for d in devices if not is_hidden_device(d)]
+        existing = {item.title: item for item in submenu.values()}
+        new_set = set(filtered_devices)
+        old_set = set(existing.keys())
+
+        for name in old_set - new_set:
+            del submenu[name]
+
+        for device in filtered_devices:
+            if device in existing:
+                existing[device].state = device == current
+            else:
+                item = rumps.MenuItem(device, callback=callback)
+                item.state = device == current
+                submenu.add(item)
+
+    def _select_input(self, sender):
+        set_input(sender.title)
+        self._rebuild_device_menus()
+
+    def _select_output(self, sender):
+        set_output(sender.title)
+        if self.mode == MODE_MEETING:
+            self._sync_meeting_input()
+        self._rebuild_device_menus()
 
     def _apply_mode_ui(self):
         is_dictation = self.mode == MODE_DICTATION
@@ -163,8 +269,8 @@ class InputSourceApp(rumps.App):
             current_input = get_current_input()
             current_output = get_current_output()
 
-            self.input_info.title = f"Input: {current_input or '—'}"
-            self.output_info.title = f"Output: {current_output or '—'}"
+            self._rebuild_device_menus()
+            self._update_airpods_visibility()
 
             if is_continuity_camera(current_input):
                 return
@@ -174,7 +280,6 @@ class InputSourceApp(rumps.App):
             else:
                 self._poll_meeting(connected, current_input, current_output)
         except (subprocess.SubprocessError, OSError, ValueError) as exc:
-            # Keep timer alive; surface failures for debugging.
             print(f"[input_source_menubar] poll error: {exc}", flush=True)
 
     def _poll_dictation(self, connected: list[str], current_input: str):
@@ -188,18 +293,49 @@ class InputSourceApp(rumps.App):
         current_input: str,
         current_output: str,
     ):
-        match = find_matching_input(current_output, connected)
-        if match and current_input != match:
-            set_input(match)
+        self._sync_input_to_output(connected, current_input, current_output)
 
     def _sync_meeting_input(self):
         current_output = get_current_output()
         connected = get_connected_inputs()
         current_input = get_current_input()
-        match = find_matching_input(current_output, connected)
+        self._sync_input_to_output(connected, current_input, current_output)
+
+    @staticmethod
+    def _sync_input_to_output(
+        connected_inputs: list[str], current_input: str, current_output: str
+    ) -> None:
+        match = find_matching_input(current_output, connected_inputs)
         if match and current_input != match:
             set_input(match)
 
+    def _update_airpods_visibility(self):
+        airpods_name = get_connected_airpods_name()
+        if airpods_name:
+            self.airpods_settings_item.title = f"{airpods_name} Settings..."
+            self.airpods_settings_item.hidden = False
+        else:
+            self.airpods_settings_item.hidden = True
+
+    def _open_sound_settings(self, _sender=None):
+        open_sound_settings()
+
+    def _open_airpods_settings(self, _sender=None):
+        open_airpods_settings()
+
+
+def hide_dock_icon():
+    """Hide the Python icon from the Dock (LSUIElement=1 equivalent)."""
+    try:
+        import AppKit
+
+        AppKit.NSApplication.sharedApplication().setActivationPolicy_(  # type: ignore[attr-defined]
+            AppKit.NSApplicationActivationPolicyAccessory  # type: ignore[attr-defined]
+        )
+    except ImportError:
+        pass
+
 
 if __name__ == "__main__":
+    hide_dock_icon()
     InputSourceApp().run()

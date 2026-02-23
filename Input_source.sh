@@ -43,7 +43,6 @@ case "${1:---set}" in
       echo "Error: Menu bar app not found at $MENUBAR_APP" >&2
       exit 1
     fi
-    sleep 15
     exec python3 "$MENUBAR_APP"
     ;;
   *)
