@@ -59,6 +59,14 @@ def set_input(device: str) -> None:
     run_sas("-t", "input", "-s", device)
 
 
+def set_input_background(device: str) -> None:
+    subprocess.Popen(
+        [SWITCH_AUDIO_SOURCE, "-t", "input", "-s", device],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def set_output(device: str) -> None:
     run_sas("-t", "output", "-s", device)
 
@@ -141,6 +149,10 @@ class InputSourceApp(rumps.App):
     def __init__(self):
         super().__init__("Input Source")
         self.mode = read_mode()
+        self.last_connected_inputs: list[str] = []
+        self.last_connected_outputs: list[str] = []
+        self.last_current_input: str = ""
+        self.last_current_output: str = ""
 
         self.dictation_item = rumps.MenuItem(
             "Dictation Mode", callback=self.set_dictation
@@ -182,6 +194,10 @@ class InputSourceApp(rumps.App):
         current_output = get_current_output()
         connected_inputs = get_connected_inputs()
         connected_outputs = get_connected_outputs()
+        self.last_connected_inputs = connected_inputs
+        self.last_connected_outputs = connected_outputs
+        self.last_current_input = current_input
+        self.last_current_output = current_output
         self._update_submenu(
             self.input_submenu, connected_inputs, current_input, self._select_input
         )
@@ -189,11 +205,21 @@ class InputSourceApp(rumps.App):
             self.output_submenu, connected_outputs, current_output, self._select_output
         )
 
-    def _rebuild_device_menus(self):
-        current_input = get_current_input()
-        current_output = get_current_output()
-        connected_inputs = get_connected_inputs()
-        connected_outputs = get_connected_outputs()
+    def _rebuild_device_menus(
+        self,
+        connected_inputs: Optional[list[str]] = None,
+        connected_outputs: Optional[list[str]] = None,
+        current_input: Optional[str] = None,
+        current_output: Optional[str] = None,
+    ):
+        if connected_inputs is None:
+            connected_inputs = get_connected_inputs()
+        if connected_outputs is None:
+            connected_outputs = get_connected_outputs()
+        if current_input is None:
+            current_input = get_current_input()
+        if current_output is None:
+            current_output = get_current_output()
 
         self._update_submenu(
             self.input_submenu, connected_inputs, current_input, self._select_input
@@ -221,10 +247,12 @@ class InputSourceApp(rumps.App):
 
     def _select_input(self, sender):
         set_input(sender.title)
+        self.last_current_input = sender.title
         self._rebuild_device_menus()
 
     def _select_output(self, sender):
         set_output(sender.title)
+        self.last_current_output = sender.title
         if self.mode == MODE_MEETING:
             self._sync_meeting_input()
         self._rebuild_device_menus()
@@ -241,6 +269,12 @@ class InputSourceApp(rumps.App):
         self.mode = MODE_DICTATION
         write_mode(self.mode)
         self._apply_mode_ui()
+        # Apply dictation behavior immediately when switching modes.
+        connected = self.last_connected_inputs or get_connected_inputs()
+        current_input = self.last_current_input or get_current_input()
+        new_input = self._poll_dictation(connected, current_input, background=True)
+        self.last_current_input = new_input
+        self._set_input_menu_state(new_input)
         rumps.notification(
             "Input Source",
             "Switched to Dictation Mode",
@@ -254,7 +288,9 @@ class InputSourceApp(rumps.App):
         self.mode = MODE_MEETING
         write_mode(self.mode)
         self._apply_mode_ui()
-        self._sync_meeting_input()
+        new_input = self._sync_meeting_input(background=True)
+        self.last_current_input = new_input
+        self._set_input_menu_state(new_input)
 
         rumps.notification(
             "Input Source",
@@ -266,11 +302,21 @@ class InputSourceApp(rumps.App):
     def _poll(self, _timer):
         try:
             connected = get_connected_inputs()
+            connected_outputs = get_connected_outputs()
             current_input = get_current_input()
             current_output = get_current_output()
+            self.last_connected_inputs = connected
+            self.last_connected_outputs = connected_outputs
+            self.last_current_input = current_input
+            self.last_current_output = current_output
 
-            self._rebuild_device_menus()
-            self._update_airpods_visibility()
+            self._rebuild_device_menus(
+                connected_inputs=connected,
+                connected_outputs=connected_outputs,
+                current_input=current_input,
+                current_output=current_output,
+            )
+            self._update_airpods_visibility(connected, connected_outputs)
 
             if is_continuity_camera(current_input):
                 return
@@ -282,10 +328,17 @@ class InputSourceApp(rumps.App):
         except (subprocess.SubprocessError, OSError, ValueError) as exc:
             print(f"[input_source_menubar] poll error: {exc}", flush=True)
 
-    def _poll_dictation(self, connected: list[str], current_input: str):
+    def _poll_dictation(
+        self, connected: list[str], current_input: str, background: bool = False
+    ) -> str:
         priority = pick_prioritized_input(connected)
         if priority and current_input != priority:
-            set_input(priority)
+            if background:
+                set_input_background(priority)
+            else:
+                set_input(priority)
+            return priority
+        return current_input
 
     def _poll_meeting(
         self,
@@ -295,22 +348,48 @@ class InputSourceApp(rumps.App):
     ):
         self._sync_input_to_output(connected, current_input, current_output)
 
-    def _sync_meeting_input(self):
-        current_output = get_current_output()
-        connected = get_connected_inputs()
-        current_input = get_current_input()
-        self._sync_input_to_output(connected, current_input, current_output)
+    def _sync_meeting_input(self, background: bool = False) -> str:
+        current_output = self.last_current_output or get_current_output()
+        connected = self.last_connected_inputs or get_connected_inputs()
+        current_input = self.last_current_input or get_current_input()
+        return self._sync_input_to_output(
+            connected, current_input, current_output, background=background
+        )
 
     @staticmethod
     def _sync_input_to_output(
-        connected_inputs: list[str], current_input: str, current_output: str
-    ) -> None:
+        connected_inputs: list[str],
+        current_input: str,
+        current_output: str,
+        background: bool = False,
+    ) -> str:
         match = find_matching_input(current_output, connected_inputs)
         if match and current_input != match:
-            set_input(match)
+            if background:
+                set_input_background(match)
+            else:
+                set_input(match)
+            return match
+        return current_input
 
-    def _update_airpods_visibility(self):
-        airpods_name = get_connected_airpods_name()
+    def _set_input_menu_state(self, selected_input: str) -> None:
+        for item in self.input_submenu.values():
+            item.state = item.title == selected_input
+
+    def _update_airpods_visibility(
+        self,
+        connected_inputs: Optional[list[str]] = None,
+        connected_outputs: Optional[list[str]] = None,
+    ):
+        if connected_inputs is None:
+            connected_inputs = self.last_connected_inputs or get_connected_inputs()
+        if connected_outputs is None:
+            connected_outputs = self.last_connected_outputs or get_connected_outputs()
+        airpods_name = None
+        for device in [*connected_inputs, *connected_outputs]:
+            if is_airpods(device):
+                airpods_name = device
+                break
         if airpods_name:
             self.airpods_settings_item.title = f"{airpods_name} Settings..."
             self.airpods_settings_item.hidden = False
