@@ -13,6 +13,7 @@ Requires: brew install switchaudio-osx
 from __future__ import annotations
 
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import rumps
@@ -96,12 +97,14 @@ def is_hidden_device(device: str) -> bool:
     return any(keyword in name for keyword in HIDDEN_DEVICE_KEYWORDS)
 
 
-def get_connected_airpods_name() -> Optional[str]:
-    devices = get_connected_inputs() + get_connected_outputs()
-    for d in devices:
-        if is_airpods(d):
-            return d
-    return None
+def fetch_all_device_state() -> tuple[list[str], list[str], str, str]:
+    """Query all four device properties in parallel."""
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_ci = pool.submit(get_connected_inputs)
+        f_co = pool.submit(get_connected_outputs)
+        f_i = pool.submit(get_current_input)
+        f_o = pool.submit(get_current_output)
+    return f_ci.result(), f_co.result(), f_i.result(), f_o.result()
 
 
 def open_sound_settings() -> None:
@@ -190,10 +193,9 @@ class InputSourceApp(rumps.App):
         self.timer.start()
 
     def _populate_initial_devices(self):
-        current_input = get_current_input()
-        current_output = get_current_output()
-        connected_inputs = get_connected_inputs()
-        connected_outputs = get_connected_outputs()
+        connected_inputs, connected_outputs, current_input, current_output = (
+            fetch_all_device_state()
+        )
         self.last_connected_inputs = connected_inputs
         self.last_connected_outputs = connected_outputs
         self.last_current_input = current_input
@@ -246,16 +248,18 @@ class InputSourceApp(rumps.App):
                 submenu.add(item)
 
     def _select_input(self, sender):
-        set_input(sender.title)
+        set_input_background(sender.title)
         self.last_current_input = sender.title
-        self._rebuild_device_menus()
+        self._set_input_menu_state(sender.title)
 
     def _select_output(self, sender):
         set_output(sender.title)
         self.last_current_output = sender.title
         if self.mode == MODE_MEETING:
-            self._sync_meeting_input()
-        self._rebuild_device_menus()
+            new_input = self._sync_meeting_input(background=True)
+            self.last_current_input = new_input
+            self._set_input_menu_state(new_input)
+        self._set_output_menu_state(sender.title)
 
     def _apply_mode_ui(self):
         is_dictation = self.mode == MODE_DICTATION
@@ -301,10 +305,9 @@ class InputSourceApp(rumps.App):
 
     def _poll(self, _timer):
         try:
-            connected = get_connected_inputs()
-            connected_outputs = get_connected_outputs()
-            current_input = get_current_input()
-            current_output = get_current_output()
+            connected, connected_outputs, current_input, current_output = (
+                fetch_all_device_state()
+            )
             self.last_connected_inputs = connected
             self.last_connected_outputs = connected_outputs
             self.last_current_input = current_input
@@ -375,6 +378,10 @@ class InputSourceApp(rumps.App):
     def _set_input_menu_state(self, selected_input: str) -> None:
         for item in self.input_submenu.values():
             item.state = item.title == selected_input
+
+    def _set_output_menu_state(self, selected_output: str) -> None:
+        for item in self.output_submenu.values():
+            item.state = item.title == selected_output
 
     def _update_airpods_visibility(
         self,
